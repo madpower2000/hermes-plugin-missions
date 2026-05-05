@@ -208,11 +208,104 @@ def _parse_worker_map(items: Optional[Iterable[str]]) -> dict[str, str]:
     return mapping
 
 
+def _parse_named_values(items: Optional[Iterable[str]], *, option: str, default_key: str = "default") -> dict[str, str]:
+    """Parse repeatable NAME=VALUE options, also accepting a bare default VALUE.
+
+    Examples:
+      ["local-qwen-fast"] -> {"default": "local-qwen-fast"}
+      ["backend=local-qwen-fast", "frontend=gpt-5.4"] -> {"backend": "local-qwen-fast", ...}
+    """
+    parsed: dict[str, str] = {}
+    for item in items or []:
+        raw = str(item).strip()
+        if not raw:
+            continue
+        if "=" in raw:
+            name, value = raw.split("=", 1)
+            name = name.strip()
+            value = value.strip()
+            if not name or not value:
+                raise ValueError(f"{option} expects name=value or value, got {item!r}")
+            parsed[name] = value
+        else:
+            parsed[default_key] = raw
+    return parsed
+
+
+def _agent_model_entry(model: Optional[str] = None, provider: Optional[str] = None) -> dict[str, str]:
+    entry: dict[str, str] = {}
+    if model:
+        entry["model"] = model
+    if provider:
+        entry["provider"] = provider
+    return entry
+
+
+def build_agent_model_config(
+    *,
+    orchestrator_model: Optional[str] = None,
+    orchestrator_provider: Optional[str] = None,
+    worker_models: Optional[Iterable[str]] = None,
+    worker_providers: Optional[Iterable[str]] = None,
+    validator_models: Optional[Iterable[str]] = None,
+    validator_providers: Optional[Iterable[str]] = None,
+) -> dict[str, Any]:
+    """Build mission metadata describing desired model/provider per agent role.
+
+    This metadata is persisted with the mission for auditability. Runtime model
+    selection is profile-based: the Kanban dispatcher runs `hermes -p <assignee>`;
+    configure each assignee profile's `model.default` and `model.provider` with
+    `hermes mission profiles --install ...` or equivalent `hermes -p ... config set`.
+    """
+    cfg: dict[str, Any] = {}
+    orch = _agent_model_entry(orchestrator_model, orchestrator_provider)
+    if orch:
+        cfg["orchestrator"] = orch
+
+    w_models = _parse_named_values(worker_models, option="--worker-model")
+    w_providers = _parse_named_values(worker_providers, option="--worker-provider")
+    worker_keys = sorted(set(w_models) | set(w_providers))
+    if worker_keys:
+        cfg["workers"] = {k: _agent_model_entry(w_models.get(k), w_providers.get(k)) for k in worker_keys}
+
+    v_models = _parse_named_values(validator_models, option="--validator-model")
+    v_providers = _parse_named_values(validator_providers, option="--validator-provider")
+    validator_keys = sorted(set(v_models) | set(v_providers))
+    if validator_keys:
+        cfg["validators"] = {k: _agent_model_entry(v_models.get(k), v_providers.get(k)) for k in validator_keys}
+
+    return cfg
+
+
+def _resolve_agent_model(agent_models: dict[str, Any], section: str, key: Optional[str] = None) -> dict[str, str]:
+    section_cfg = agent_models.get(section) if isinstance(agent_models, dict) else None
+    if not isinstance(section_cfg, dict):
+        return {}
+    if section == "orchestrator":
+        return {k: str(v) for k, v in section_cfg.items() if k in {"model", "provider"} and v}
+    if key and isinstance(section_cfg.get(key), dict):
+        return {k: str(v) for k, v in section_cfg[key].items() if k in {"model", "provider"} and v}
+    if isinstance(section_cfg.get("default"), dict):
+        return {k: str(v) for k, v in section_cfg["default"].items() if k in {"model", "provider"} and v}
+    return {}
+
+
+def _format_model_hint(label: str, cfg: dict[str, str]) -> str:
+    if not cfg:
+        return ""
+    bits = []
+    if cfg.get("model"):
+        bits.append(f"model={cfg['model']}")
+    if cfg.get("provider"):
+        bits.append(f"provider={cfg['provider']}")
+    return f"\n{label} model config: " + ", ".join(bits)
+
+
 def root_task_body(meta: dict[str, Any]) -> str:
     artifacts = meta["artifacts"]
     return f"""Mission ID: {meta['mission_id']}
 Repo: {meta['repo']}
-Goal: {meta['goal']}
+Goal: {meta['goal']}{_format_model_hint('Orchestrator', _resolve_agent_model(meta.get('agent_models') or {}, 'orchestrator'))}
 Artifacts:
 - validation contract path: {artifacts['validation_contract']}
 - features path: {artifacts['features']}
@@ -412,6 +505,12 @@ def create_mission(
     idempotency_key: Optional[str] = None,
     skip_clarification: bool = False,
     dry_run: bool = False,
+    orchestrator_model: Optional[str] = None,
+    orchestrator_provider: Optional[str] = None,
+    worker_models: Optional[list[str]] = None,
+    worker_providers: Optional[list[str]] = None,
+    validator_models: Optional[list[str]] = None,
+    validator_providers: Optional[list[str]] = None,
 ) -> MissionCreateResult:
     repo = _ensure_repo(repo_arg)
     mission_id = idempotency_key or generate_mission_id(goal)
@@ -422,6 +521,14 @@ def create_mission(
     ws_kind, ws_path, ws_display = _split_workspace(workspace or f"dir:{repo}", repo)
     tenant_value = tenant or mission_id
     artifacts = _artifact_paths(path)
+    agent_models = build_agent_model_config(
+        orchestrator_model=orchestrator_model,
+        orchestrator_provider=orchestrator_provider,
+        worker_models=worker_models,
+        worker_providers=worker_providers,
+        validator_models=validator_models,
+        validator_providers=validator_providers,
+    )
     meta = {
         "mission_id": mission_id,
         "title": title,
@@ -439,6 +546,7 @@ def create_mission(
         "validation_round": 0,
         "workspace": ws_display,
         "skip_clarification": bool(skip_clarification),
+        "agent_models": agent_models,
         "kanban": {
             "board": board,
             "tenant": tenant_value,
@@ -553,7 +661,7 @@ def plan_mission(mission_id: str) -> dict[str, Any]:
 def planning_task_body(meta: dict[str, Any]) -> str:
     return f"""Mission ID: {meta['mission_id']}
 Repo: {meta['repo']}
-Goal: {meta['goal']}
+Goal: {meta['goal']}{_format_model_hint('Orchestrator', _resolve_agent_model(meta.get('agent_models') or {}, 'orchestrator'))}
 Artifacts:
 - validation contract: {meta['artifacts']['validation_contract']}
 - features: {meta['artifacts']['features']}
@@ -724,7 +832,7 @@ def feature_task_body(meta: dict[str, Any], milestone: dict[str, Any], feature: 
 Feature ID: {feature.get('id')}
 Milestone ID: {milestone.get('id')}
 Repo: {meta['repo']}
-Workspace: {feature.get('workspace') or meta.get('workspace')}
+Workspace: {feature.get('workspace') or meta.get('workspace')}{_format_model_hint('Worker', _resolve_agent_model(meta.get('agent_models') or {}, 'workers', feature.get('assignee_role') or 'default'))}
 Relevant files:
 Validation assertions claimed: {', '.join(feature.get('claims_assertions') or [])}
 Required tests: {feature.get('tests_required', True)}
@@ -758,7 +866,7 @@ Milestone ID: {milestone.get('id')}
 Validation round: {round_no}
 Repo: {meta['repo']}
 Assertions to validate: {', '.join(assertions)}
-Validator kind: {validator.get('kind', 'scrutiny')}
+Validator kind: {validator.get('kind', 'scrutiny')}{_format_model_hint('Validator', _resolve_agent_model(meta.get('agent_models') or {}, 'validators', validator.get('id') or validator.get('kind') or 'default'))}
 
 Instructions:
 1. Read validation-contract.md.
@@ -780,7 +888,7 @@ Instructions:
 def gate_task_body(meta: dict[str, Any], milestone: dict[str, Any], round_no: int) -> str:
     return f"""Mission ID: {meta['mission_id']}
 Milestone ID: {milestone.get('id')}
-Validation round: {round_no}
+Validation round: {round_no}{_format_model_hint('Orchestrator', _resolve_agent_model(meta.get('agent_models') or {}, 'orchestrator'))}
 Instructions:
 1. Read validator reports.
 2. If no blocking issues remain, mark milestone passed.
@@ -1005,7 +1113,7 @@ def fix_task_body(meta: dict[str, Any], fix_id: str, title: str, report: Path) -
 Fix Feature ID: {fix_id}
 Repo: {meta['repo']}
 Source validator report: {report}
-Scope: {title}
+Scope: {title}{_format_model_hint('Worker', _resolve_agent_model(meta.get('agent_models') or {}, 'workers', 'backend'))}
 
 Instructions:
 1. Read the source validator report.
@@ -1295,7 +1403,16 @@ def mark_mission_passed(mission_id: str) -> dict[str, Any]:
     return derive_status(meta)
 
 
-def _mission_profiles_result(install: bool = False) -> dict[str, Any]:
+def _mission_profiles_result(
+    install: bool = False,
+    *,
+    orchestrator_model: Optional[str] = None,
+    orchestrator_provider: Optional[str] = None,
+    worker_model: Optional[str] = None,
+    worker_provider: Optional[str] = None,
+    validator_model: Optional[str] = None,
+    validator_provider: Optional[str] = None,
+) -> dict[str, Any]:
     """Return recommended profile setup commands for Missions."""
     profiles = [
         "mission-orchestrator",
@@ -1308,11 +1425,29 @@ def _mission_profiles_result(install: bool = False) -> dict[str, Any]:
     ]
     commands = [f"hermes profile create {p} --clone" for p in profiles]
     commands.append("hermes -p mission-orchestrator config set toolsets '[\"kanban\"]'")
+
+    def add_model_commands(profile: str, model: Optional[str], provider: Optional[str]) -> None:
+        if model:
+            commands.append(f"hermes -p {profile} config set model.default {model}")
+        if provider:
+            commands.append(f"hermes -p {profile} config set model.provider {provider}")
+
+    add_model_commands("mission-orchestrator", orchestrator_model, orchestrator_provider)
+    for profile in ["worker", "backend-eng", "frontend-eng", "flutter-eng"]:
+        add_model_commands(profile, worker_model, worker_provider)
+    for profile in ["validator", "qa-validator", "user-tester"]:
+        add_model_commands(profile, validator_model, validator_provider)
+
     return {
         "profiles": profiles,
         "commands": commands,
         "install": install,
-        "note": "After creating profiles, edit SOUL.md in each profile directory to match the role.",
+        "models": {
+            "orchestrator": _agent_model_entry(orchestrator_model, orchestrator_provider),
+            "workers": _agent_model_entry(worker_model, worker_provider),
+            "validators": _agent_model_entry(validator_model, validator_provider),
+        },
+        "note": "Kanban dispatch uses the assignee's Hermes profile. Configure model.default and model.provider per profile to run different Mission roles on different providers.",
     }
 
 
@@ -1340,6 +1475,12 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     p_create.add_argument("--priority", type=int, default=50)
     p_create.add_argument("--idempotency-key")
     p_create.add_argument("--skip-clarification", action="store_true")
+    p_create.add_argument("--orchestrator-model", help="Model to record for orchestrator tasks; configure the orchestrator profile to use it at runtime")
+    p_create.add_argument("--orchestrator-provider", help="Provider to record for orchestrator tasks")
+    p_create.add_argument("--worker-model", action="append", default=[], help="Worker model mapping: MODEL for default or role=MODEL, repeatable")
+    p_create.add_argument("--worker-provider", action="append", default=[], help="Worker provider mapping: PROVIDER for default or role=PROVIDER, repeatable")
+    p_create.add_argument("--validator-model", action="append", default=[], help="Validator model mapping: MODEL for default or validator-id=MODEL, repeatable")
+    p_create.add_argument("--validator-provider", action="append", default=[], help="Validator provider mapping: PROVIDER for default or validator-id=PROVIDER, repeatable")
     p_create.add_argument("--dry-run", action="store_true")
     p_create.add_argument("--json", action="store_true")
 
@@ -1387,6 +1528,12 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
 
     p_profiles = sub.add_parser("profiles", help="Show recommended profile setup commands")
     p_profiles.add_argument("--install", action="store_true", help="Print commands to create recommended profiles")
+    p_profiles.add_argument("--orchestrator-model", help="Model for mission-orchestrator profile")
+    p_profiles.add_argument("--orchestrator-provider", help="Provider for mission-orchestrator profile")
+    p_profiles.add_argument("--worker-model", help="Model for worker profiles")
+    p_profiles.add_argument("--worker-provider", help="Provider for worker profiles")
+    p_profiles.add_argument("--validator-model", help="Model for validator profiles")
+    p_profiles.add_argument("--validator-provider", help="Provider for validator profiles")
     p_profiles.add_argument("--json", action="store_true")
 
     parser.set_defaults(func=mission_command)
@@ -1423,8 +1570,14 @@ def mission_command(args: argparse.Namespace) -> int:
                 idempotency_key=args.idempotency_key,
                 skip_clarification=args.skip_clarification,
                 dry_run=args.dry_run,
+                orchestrator_model=args.orchestrator_model,
+                orchestrator_provider=args.orchestrator_provider,
+                worker_models=args.worker_model,
+                worker_providers=args.worker_provider,
+                validator_models=args.validator_model,
+                validator_providers=args.validator_provider,
             )
-            payload = {"mission_id": res.mission_id, "path": str(res.path), "dry_run": args.dry_run, "root_task": res.meta.get("root_task_id"), "artifacts": res.meta.get("artifacts")}
+            payload = {"mission_id": res.mission_id, "path": str(res.path), "dry_run": args.dry_run, "root_task": res.meta.get("root_task_id"), "artifacts": res.meta.get("artifacts"), "agent_models": res.meta.get("agent_models", {})}
             if args.dry_run:
                 payload["planned_root_task"] = {"title": f"MISSION: {res.meta['title']}", "assignee": res.meta["orchestrator_profile"], "board": res.meta["board"]}
             return _emit(payload, args.json, f"Mission {'dry run' if args.dry_run else 'created'}: {res.mission_id}\nPath: {res.path}\nRoot task: {payload.get('root_task') or '(dry-run)'}")
@@ -1473,7 +1626,18 @@ def mission_command(args: argparse.Namespace) -> int:
         if action == "mark-passed":
             return _emit(mark_mission_passed(args.mission_id), args.json)
         if action == "profiles":
-            return _emit(_mission_profiles_result(getattr(args, "install", False)), args.json)
+            return _emit(
+                _mission_profiles_result(
+                    getattr(args, "install", False),
+                    orchestrator_model=args.orchestrator_model,
+                    orchestrator_provider=args.orchestrator_provider,
+                    worker_model=args.worker_model,
+                    worker_provider=args.worker_provider,
+                    validator_model=args.validator_model,
+                    validator_provider=args.validator_provider,
+                ),
+                args.json,
+            )
     except Exception as exc:
         print(f"mission: {exc}", file=sys.stderr)
         return 1

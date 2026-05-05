@@ -105,6 +105,54 @@ def test_mission_create_real(tmp_repo, hermes_home):
     assert (mission_dir / "features.json").exists()
 
 
+
+
+def test_mission_create_accepts_agent_model_options(tmp_repo, hermes_home):
+    """Create should persist per-agent model/provider metadata."""
+    r = _run(
+        [
+            "mission", "create", "Model CLI mission", "--repo", tmp_repo,
+            "--idempotency-key", "MISSION-CLI-MODELS",
+            "--orchestrator-model", "gpt-5.5",
+            "--orchestrator-provider", "openai-codex",
+            "--worker-model", "local-qwen-fast",
+            "--worker-provider", "local-qwen",
+            "--validator-model", "local-qwen-fast",
+            "--validator-provider", "local-qwen",
+            "--json",
+        ],
+        env_extra={"HERMES_HOME": hermes_home},
+    )
+    assert r.returncode == 0, f"create failed:\n{r.stderr}"
+    data = json.loads(r.stdout)
+    assert data["agent_models"]["orchestrator"]["model"] == "gpt-5.5"
+    mission_yaml = Path(tmp_repo) / ".missions" / "MISSION-CLI-MODELS" / "mission.yaml"
+    text = mission_yaml.read_text(encoding="utf-8")
+    assert "agent_models:" in text
+    assert "local-qwen-fast" in text
+
+
+def test_mission_profiles_prints_model_setup_commands(hermes_home):
+    r = _run(
+        [
+            "mission", "profiles",
+            "--orchestrator-model", "gpt-5.5",
+            "--orchestrator-provider", "openai-codex",
+            "--worker-model", "local-qwen-fast",
+            "--worker-provider", "local-qwen",
+            "--validator-model", "local-qwen-fast",
+            "--validator-provider", "local-qwen",
+            "--json",
+        ],
+        env_extra={"HERMES_HOME": hermes_home},
+    )
+    assert r.returncode == 0, f"profiles failed:\n{r.stderr}"
+    data = json.loads(r.stdout)
+    commands = data["commands"]
+    assert "hermes -p mission-orchestrator config set model.default gpt-5.5" in commands
+    assert "hermes -p backend-eng config set model.default local-qwen-fast" in commands
+    assert "hermes -p qa-validator config set model.provider local-qwen" in commands
+
 def test_mission_list_json(tmp_repo, hermes_home):
     """Create a mission then list it."""
     _run(

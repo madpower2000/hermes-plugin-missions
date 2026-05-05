@@ -157,6 +157,63 @@ hermes -p mission-orchestrator config set toolsets '["kanban"]'
 
 Note: if editing YAML directly, ensure `toolsets` is a YAML list, not a string.
 
+
+## Per-agent model/provider routing
+
+Missions run through the Kanban dispatcher. The dispatcher starts each task with the assigned Hermes profile, for example `hermes -p mission-orchestrator ...` or `hermes -p backend-eng ...`. Therefore runtime model selection is profile-based.
+
+Use different profiles for different Mission roles, then configure each profile's model/provider:
+
+```bash
+# Orchestrator on GPT-5.5.
+hermes -p mission-orchestrator config set model.default gpt-5.5
+hermes -p mission-orchestrator config set model.provider openai-codex
+
+# Workers on local Qwen.
+hermes -p worker config set model.default local-qwen-fast
+hermes -p worker config set model.provider local-qwen
+hermes -p backend-eng config set model.default local-qwen-fast
+hermes -p backend-eng config set model.provider local-qwen
+hermes -p frontend-eng config set model.default local-qwen-fast
+hermes -p frontend-eng config set model.provider local-qwen
+
+# Validators on local Qwen.
+hermes -p validator config set model.default local-qwen-fast
+hermes -p validator config set model.provider local-qwen
+hermes -p qa-validator config set model.default local-qwen-fast
+hermes -p qa-validator config set model.provider local-qwen
+```
+
+`hermes mission profiles` can print these setup commands:
+
+```bash
+hermes mission profiles \
+  --orchestrator-model gpt-5.5 \
+  --orchestrator-provider openai-codex \
+  --worker-model local-qwen-fast \
+  --worker-provider local-qwen \
+  --validator-model local-qwen-fast \
+  --validator-provider local-qwen
+```
+
+`hermes mission create` can also persist the intended routing in `mission.yaml` for auditability and include it in generated task prompts:
+
+```bash
+hermes mission create "Ship feature" \
+  --repo /absolute/path/to/repo \
+  --assignee mission-orchestrator \
+  --worker backend=backend-eng \
+  --validator qa-validator \
+  --orchestrator-model gpt-5.5 \
+  --orchestrator-provider openai-codex \
+  --worker-model local-qwen-fast \
+  --worker-provider local-qwen \
+  --validator-model local-qwen-fast \
+  --validator-provider local-qwen
+```
+
+You can override worker models by role with `--worker-model role=model` and `--worker-provider role=provider`, for example `--worker-model backend=local-qwen-smart`. Bare values become the default for all workers or validators.
+
 Example profile identities:
 
 ```text

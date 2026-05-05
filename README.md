@@ -61,6 +61,25 @@ plugins:
 
 This plugin intentionally imports Hermes internals such as `hermes_cli.kanban_db` and `hermes_constants`. It is standalone as a plugin repository, not standalone as a generic Python package.
 
+
+## Per-agent model/provider routing
+
+Missions use Hermes profiles as agent identities. Configure different models per profile, for example:
+
+```bash
+hermes mission profiles \
+  --orchestrator-model gpt-5.5 \
+  --orchestrator-provider openai-codex \
+  --worker-model local-qwen-fast \
+  --worker-provider local-qwen \
+  --validator-model local-qwen-fast \
+  --validator-provider local-qwen
+```
+
+Then run the printed `hermes -p <profile> config set ...` commands. The Kanban dispatcher will run each Mission task with its assignee profile, so orchestrator tasks can use GPT-5.5 while worker/validator tasks use local Qwen.
+
+`hermes mission create` also accepts `--orchestrator-model`, `--worker-model`, and `--validator-model` options to record intended routing in the mission metadata and generated task prompts.
+
 ## Development
 
 The plugin root must contain:

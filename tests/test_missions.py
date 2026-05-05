@@ -141,3 +141,69 @@ def test_orchestrator_kanban_tools_visible_with_kanban_toolset(isolated_home, mo
     (isolated_home / "config.yaml").write_text("toolsets:\n  - kanban\n", encoding="utf-8")
     from tools import kanban_tools as kt
     assert kt._check_kanban_mode() is True
+
+
+
+def test_create_mission_records_per_agent_models(isolated_home):
+    repo = isolated_home / "repo-models"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    res = missions.create_mission(
+        "Model routed mission",
+        repo_arg=str(repo),
+        idempotency_key="MISSION-MODELS",
+        orchestrator_model="gpt-5.5",
+        orchestrator_provider="openai-codex",
+        worker_models=["local-qwen-fast", "backend=local-qwen-smart"],
+        worker_providers=["local-qwen"],
+        validator_models=["local-qwen-fast"],
+        validator_providers=["local-qwen"],
+    )
+
+    models = res.meta["agent_models"]
+    assert models["orchestrator"] == {"model": "gpt-5.5", "provider": "openai-codex"}
+    assert models["workers"]["default"] == {"model": "local-qwen-fast", "provider": "local-qwen"}
+    assert models["workers"]["backend"] == {"model": "local-qwen-smart"}
+    assert models["validators"]["default"] == {"model": "local-qwen-fast", "provider": "local-qwen"}
+
+    mission_yaml = repo / ".missions" / "MISSION-MODELS" / "mission.yaml"
+    assert "agent_models:" in mission_yaml.read_text(encoding="utf-8")
+
+
+def test_agent_model_hints_are_in_task_bodies(isolated_home):
+    repo = isolated_home / "repo-hints"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    res = missions.create_mission(
+        "Hint mission",
+        repo_arg=str(repo),
+        idempotency_key="MISSION-HINTS",
+        orchestrator_model="gpt-5.5",
+        worker_models=["backend=local-qwen-smart"],
+        validator_models=["local-qwen-fast"],
+    )
+    meta = res.meta
+    feature = missions.default_features(meta)["milestones"][0]["features"][0]
+    validator = missions.default_features(meta)["milestones"][0]["validators"][0]
+    milestone = missions.default_features(meta)["milestones"][0]
+
+    assert "Orchestrator model config: model=gpt-5.5" in missions.root_task_body(meta)
+    assert "Worker model config: model=local-qwen-smart" in missions.feature_task_body(meta, milestone, feature)
+    assert "Validator model config: model=local-qwen-fast" in missions.validator_task_body(meta, milestone, validator, 1)
+
+
+def test_profiles_result_includes_model_commands():
+    result = missions._mission_profiles_result(
+        install=True,
+        orchestrator_model="gpt-5.5",
+        orchestrator_provider="openai-codex",
+        worker_model="local-qwen-fast",
+        worker_provider="local-qwen",
+        validator_model="local-qwen-fast",
+        validator_provider="local-qwen",
+    )
+    commands = result["commands"]
+    assert "hermes -p mission-orchestrator config set model.default gpt-5.5" in commands
+    assert "hermes -p mission-orchestrator config set model.provider openai-codex" in commands
+    assert "hermes -p backend-eng config set model.default local-qwen-fast" in commands
+    assert "hermes -p qa-validator config set model.provider local-qwen" in commands
