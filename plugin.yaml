@@ -1,0 +1,5 @@
+name: missions
+version: 0.1.0
+description: Factory-style long-running project workflows built on Hermes Kanban
+provides_cli_commands:
+  - mission
